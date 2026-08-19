@@ -55,7 +55,7 @@ async def stream_to_elevenlabs(text_iterator):
     # YOUR specific custom voice ID
     voice_id = "CwhRBWXzGAHq8TQ4Fs17" 
     
-    uri = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input?model_id=eleven_turbo_v2_5&output_format=pcm_16000"
+    uri = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input?model_id=eleven_turbo_v2_5&output_format=pcm_16000&optimize_streaming_latency=3"
     
     headers = {"xi-api-key": ELEVENLABS_KEY}
     
@@ -198,7 +198,7 @@ async def main():
         model="nova-2",
         language="en-US",
         smart_format=True,
-        endpointing=500,
+        endpointing=200,
         interim_results=True,
         encoding="linear16",      
         sample_rate=INPUT_RATE,   
