@@ -1,14 +1,21 @@
 services:
-  app:
+  api:
     build: .
     environment:
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - GROQ_API_KEY=${GROQ_API_KEY}
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
-    depends_on:
-      - redis
 
-  redis:
-    image: redis:alpine
+  caddy:
+    image: caddy:2-alpine
     ports:
-      - "6379:6379"
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+    depends_on:
+      - api
+
+volumes:
+  caddy_data:

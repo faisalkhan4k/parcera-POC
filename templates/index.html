@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Atomic Wings Voice Agent</title>
+    <style>
+        body { font-family: -apple-system, sans-serif; text-align: center; margin-top: 50px; background: #f4f4f9; }
+        button {
+            padding: 20px 40px; font-size: 20px; font-weight: bold; cursor: pointer;
+            border-radius: 12px; border: none; background: #ff4747; color: white;
+            transition: 0.2s; box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        button:active { transform: scale(0.95); }
+        button.active { background: #4caf50; }
+        button.speaking { background: #2196f3; animation: pulse 1.2s infinite; }
+        #status { margin-top: 16px; font-size: 15px; color: #666; }
+        #chat { margin-top: 30px; max-width: 600px; margin-left: auto; margin-right: auto; text-align: left; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); min-height: 40px; }
+        .log { margin-bottom: 10px; line-height: 1.5; }
+        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(33,150,243,0.6); } 70% { box-shadow: 0 0 0 15px rgba(33,150,243,0); } 100% { box-shadow: 0 0 0 0 rgba(33,150,243,0); } }
+    </style>
+</head>
+<body>
+
+    <h1>Atomic Wings Voice Order</h1>
+    <p>Tap once to start &mdash; then just talk. Speak anytime to interrupt the agent.</p>
+
+    <button id="startBtn">Start Conversation</button>
+    <div id="status">Not connected</div>
+    <div id="chat"></div>
+
+    <script>
+        let ws;
+        let micCtx, playCtx;
+        let processor, source;
+        let playTime = 0;
+        let activeSources = [];
+        let started = false;
+
+        const startBtn = document.getElementById("startBtn");
+        const statusEl = document.getElementById("status");
+        const chatEl = document.getElementById("chat");
+
+        function logMessage(label, text) {
+            const p = document.createElement("div");
+            p.className = "log";
+            p.innerHTML = `<b>${label}:</b> ${text}`;
+            chatEl.appendChild(p);
+            chatEl.scrollTop = chatEl.scrollHeight;
+        }
+
+        function stopAllPlayback() {
+            activeSources.forEach(src => {
+                try { src.stop(); } catch (e) {}
+            });
+            activeSources = [];
+            if (playCtx) playTime = playCtx.currentTime;
+        }
+
+        function playPcmChunk(arrayBuffer) {
+            const int16 = new Int16Array(arrayBuffer);
+            const float32 = new Float32Array(int16.length);
+            for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+
+            const audioBuffer = playCtx.createBuffer(1, float32.length, 16000);
+            audioBuffer.copyToChannel(float32, 0);
+
+            const src = playCtx.createBufferSource();
+            src.buffer = audioBuffer;
+            src.connect(playCtx.destination);
+
+            const now = playCtx.currentTime;
+            if (playTime < now) playTime = now;
+            src.start(playTime);
+            playTime += audioBuffer.duration;
+
+            activeSources.push(src);
+            startBtn.classList.add("speaking");
+            src.onended = () => {
+                activeSources = activeSources.filter(s => s !== src);
+                if (activeSources.length === 0) startBtn.classList.remove("speaking");
+            };
+        }
+
+        async function startConversation() {
+            if (started) return;
+            started = true;
+            startBtn.classList.add("active");
+            startBtn.innerText = "Listening...";
+            statusEl.innerText = "Connecting...";
+
+            const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+            ws.binaryType = "arraybuffer";
+
+            // Created within the click handler's async chain so it can be
+            // resumed reliably -- browsers may otherwise leave AudioContexts
+            // in a "suspended" state, which silently drops all audio.
+            playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+            await playCtx.resume();
+            playTime = playCtx.currentTime;
+            console.log("[audio] playback context state:", playCtx.state);
+
+            ws.onmessage = (event) => {
+                if (typeof event.data === "string") {
+                    const data = JSON.parse(event.data);
+                    if (data.type === "user_text") {
+                        logMessage("You", data.text);
+                    } else if (data.type === "ai_text") {
+                        logMessage("Agent", data.text);
+                    } else if (data.type === "interrupted") {
+                        stopAllPlayback();
+                    }
+                } else {
+                    playPcmChunk(event.data);
+                }
+            };
+
+            ws.onopen = async () => {
+                statusEl.innerText = "🟢 Live — speak anytime";
+                console.log("[ws] connected");
+
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    console.log("[mic] permission granted");
+
+                    micCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    await micCtx.resume();
+                    console.log("[audio] mic context state:", micCtx.state, "sampleRate:", micCtx.sampleRate);
+
+                    source = micCtx.createMediaStreamSource(stream);
+                    processor = micCtx.createScriptProcessor(4096, 1, 1);
+
+                    let chunkCount = 0;
+                    processor.onaudioprocess = (e) => {
+                        const input = e.inputBuffer.getChannelData(0);
+                        const ratio = micCtx.sampleRate / 16000;
+                        const outLength = Math.floor(input.length / ratio);
+                        const int16 = new Int16Array(outLength);
+                        for (let i = 0; i < outLength; i++) {
+                            const s = Math.max(-1, Math.min(1, input[Math.floor(i * ratio)]));
+                            int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                        }
+                        if (ws.readyState === WebSocket.OPEN) {
+                            ws.send(int16.buffer);
+                            chunkCount++;
+                            if (chunkCount % 50 === 0) console.log(`[mic] sent ${chunkCount} audio chunks so far`);
+                        }
+                    };
+
+                    source.connect(processor);
+                    processor.connect(micCtx.destination);
+                } catch (err) {
+                    console.error("[mic] failed to start:", err);
+                    statusEl.innerText = "Microphone error — check browser permissions.";
+                }
+            };
+
+            ws.onclose = () => {
+                console.log("[ws] closed");
+                statusEl.innerText = "Disconnected.";
+                startBtn.classList.remove("active", "speaking");
+                startBtn.innerText = "Start Conversation";
+                started = false;
+            };
+
+            ws.onerror = (err) => {
+                console.error("[ws] error:", err);
+                statusEl.innerText = "Connection error.";
+            };
+        }
+
+        startBtn.addEventListener("click", startConversation);
+    </script>
+</body>
+</html>
